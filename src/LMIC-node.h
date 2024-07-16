@@ -225,6 +225,22 @@ enum class ActivationMode {OTAA, ABP};
         }
     }
 
+    void printAscii(Print& printer, uint8_t* bytes, size_t length = 1, bool linefeed = false, char separator = 0)
+    {
+        for (size_t i = 0; i < length; ++i)
+        {
+            if (i > 0 && separator != 0)
+            {
+                printer.print(separator);
+            }
+            printer.print((char)bytes[i]);        
+        }
+        if (linefeed)
+        {
+            printer.println();
+        }
+    }
+
 
     void setTxIndicatorsOn(bool on = true)
     {
@@ -264,6 +280,7 @@ enum class ActivationMode {OTAA, ABP};
     #define HEADER_ROW        ROW_0
     #define DEVICEID_ROW      ROW_1
     #define INTERVAL_ROW      ROW_2
+    #define UPLINK_ROW        ROW_3
     #define TIME_ROW          ROW_4
     #define EVENT_ROW         ROW_5
     #define STATUS_ROW        ROW_6

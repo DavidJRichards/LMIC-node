@@ -52,15 +52,21 @@
 
 #include "LMIC-node.h"
 
-
 //  █ █ █▀▀ █▀▀ █▀▄   █▀▀ █▀█ █▀▄ █▀▀   █▀▄ █▀▀ █▀▀ ▀█▀ █▀█
 //  █ █ ▀▀█ █▀▀ █▀▄   █   █ █ █ █ █▀▀   █▀▄ █▀▀ █ █  █  █ █
 //  ▀▀▀ ▀▀▀ ▀▀▀ ▀ ▀   ▀▀▀ ▀▀▀ ▀▀  ▀▀▀   ▀▀  ▀▀▀ ▀▀▀ ▀▀▀ ▀ ▀
 
+#include "axp20x.h"
+extern AXP20X_Class axp;
+#include "gps.h"
+gps gps1;
 
-const uint8_t payloadBufferLength = 4;    // Adjust to fit max payload length
+const uint8_t payloadBufferLength = 14;    // Adjust to fit max payload length
 
-
+double lastLat = HOME_LATITUDE;
+double lastLon = HOME_LONGITUDE;
+float BattVoltage = 0.0;
+float BattCurrent = 0.0;
 //  █ █ █▀▀ █▀▀ █▀▄   █▀▀ █▀█ █▀▄ █▀▀   █▀▀ █▀█ █▀▄
 //  █ █ ▀▀█ █▀▀ █▀▄   █   █ █ █ █ █▀▀   █▀▀ █ █ █ █
 //  ▀▀▀ ▀▀▀ ▀▀▀ ▀ ▀   ▀▀▀ ▀▀▀ ▀▀  ▀▀▀   ▀▀▀ ▀ ▀ ▀▀ 
@@ -69,7 +75,10 @@ const uint8_t payloadBufferLength = 4;    // Adjust to fit max payload length
 uint8_t payloadBuffer[payloadBufferLength];
 static osjob_t doWorkJob;
 uint32_t doWorkIntervalSeconds = DO_WORK_INTERVAL_SECONDS;  // Change value in platformio.ini
-
+uint32_t doWorkMinDistance = MIN_DISTANCE;                 // Change value in platformio.ini
+uint32_t doWorkGpsDeviation = GPS_DEVIATION;               // Change value in platformio.ini
+uint32_t latestGpsDistance; 
+uint32_t latestGpsDeviation;
 // Note: LoRa module pin mappings are defined in the Board Support Files.
 
 // Set LoRaWAN keys defined in lorawan-keys.h.
@@ -706,6 +715,48 @@ void resetCounter()
     counter_ = 0;
 }
 
+void setUplinkInterval(uint8_t interval)
+{
+    doWorkIntervalSeconds = interval;
+    Serial.print("Interval set to ");
+    Serial.print(interval);
+    Serial.println(" sec.");
+}
+
+void setMinDistance(uint8_t distance)
+{
+    doWorkMinDistance = distance;
+    Serial.print("Min distance set to ");
+    Serial.print(distance);
+    Serial.println(" m.");
+}
+
+void setGpsDeviation(uint8_t deviation)
+{
+    doWorkGpsDeviation = deviation / 10.0;
+    Serial.print("GPS deviation set to ");
+    Serial.print(deviation);
+    Serial.println(" m.");
+}
+
+void sendEmptyPayload(void)
+{
+    printSpaces(serial, MESSAGE_INDENT);
+    Serial.println("Sending status only payload");
+    // Prepare uplink payload.
+    uint8_t fPort = 11;
+    uint8_t payloadLength = 5;
+
+    payloadBuffer[0]= (uint8_t) round(BattVoltage * 10.0);
+    int16_t BattCurrent_x10 = (int16_t) round(BattCurrent * 10.0);
+    payloadBuffer[1] = (BattCurrent_x10 >> 8) & 0xFF;
+    payloadBuffer[2] = BattCurrent_x10 & 0xFF;
+    payloadBuffer[3] = gps1.getSats() & 0xFF;
+    payloadBuffer[4] = gps1.getHdop() / 10;
+    
+    scheduleUplink(fPort, payloadBuffer, payloadLength);
+}
+
 
 void processWork(ostime_t doWorkJobTimeStamp)
 {
@@ -718,6 +769,8 @@ void processWork(ostime_t doWorkJobTimeStamp)
     // reading sensor and GPS data and schedule uplink
     // messages if anything needs to be transmitted.
 
+    BattVoltage = axp.getBattVoltage()/1000;
+    BattCurrent = axp.getBattChargeCurrent() - axp.getBattDischargeCurrent();
     // Skip processWork if using OTAA and still joining.
     if (LMIC.devaddr != 0)
     {
@@ -738,14 +791,38 @@ void processWork(ostime_t doWorkJobTimeStamp)
             display.print("I:");
             display.print(doWorkIntervalSeconds);
             display.print("s");        
-            display.print(" Ctr:");
-            display.print(counterValue);
+    //        display.print(" Ctr:");
+    //        display.print(counterValue);
+						
+            display.print(" M:");
+            display.print(doWorkMinDistance);
+            display.print(" ");
+            
+            display.print("G:");
+            display.print(doWorkGpsDeviation);
+            display.print("m");
+            //--------------------
+            display.clearLine(UPLINK_ROW);
+            display.setCursor(COL_0, UPLINK_ROW);
+            display.print("D:");
+            display.print(latestGpsDistance);
+            display.print("m");
+            
+//            display.print("Dev:");
+//            display.print(latestGpsDeviation);
+//            display.print("m");
+
         #endif
         #ifdef USE_SERIAL
             printEvent(timestamp, "Input data collected", PrintTarget::Serial);
             printSpaces(serial, MESSAGE_INDENT);
             serial.print(F("COUNTER value: "));
             serial.println(counterValue);
+
+        char s[32];
+        snprintf(s, sizeof(s), "BATTERY: %.1fV %.0fmA", BattVoltage, BattCurrent);
+        printSpaces(serial, MESSAGE_INDENT);
+        serial.println(s);
         #endif    
 
         // For simplicity LMIC-node will try to send an uplink
@@ -764,16 +841,137 @@ void processWork(ostime_t doWorkJobTimeStamp)
         }
         else
         {
-            // Prepare uplink payload.
-            uint8_t fPort = 10;
-            payloadBuffer[0] = counterValue >> 8;
-            payloadBuffer[1] = counterValue & 0xFF;
-            uint8_t payloadLength = 2;
+            // Send uplink only if
+            //   a) a valid gps fix
+            //   b) outside "MIN_DISTANCE" (meter) from given location "HOME_LATITUDE", "HOME_LONGITUDE"
+            //   c) new gps position differs more than "GPS_DEVIATION" (meter) from previous position
+            // get gps data
+            if (gps1.checkGpsFix())
+            {
+                latestGpsDistance = gps1.distanceTo(HOME_LATITUDE, HOME_LONGITUDE);
+                latestGpsDeviation = gps1.distanceTo(lastLat, lastLon);
 
-            scheduleUplink(fPort, payloadBuffer, payloadLength);
+//                display.clearLine(UPLINK_ROW);  // waiting for new data
+
+#ifdef USE_SERIAL
+//                Serial.println();
+                printSpaces(serial, MESSAGE_INDENT);
+                Serial.println("Valid gps Fix");
+                
+                printSpaces(serial, MESSAGE_INDENT);
+                Serial.println("Current Position:");
+                
+                sprintf(s, "Lat: %f", gps1.getLatitude());
+                printSpaces(serial, MESSAGE_INDENT);
+                Serial.println(s);
+                
+                sprintf(s, "Lon: %f", gps1.getLongitude());
+                printSpaces(serial, MESSAGE_INDENT);
+                Serial.println(s);
+
+                sprintf(s, "Alt: %.1f", gps1.getAltitude());
+                printSpaces(serial, MESSAGE_INDENT);
+                Serial.println(s);
+
+                sprintf(s, "hdop: %.1f", gps1.getHdop() /10.0);
+                printSpaces(serial, MESSAGE_INDENT);
+                Serial.println(s);
+                
+                sprintf(s, "sats: %d", gps1.getSats());
+                printSpaces(serial, MESSAGE_INDENT);
+                Serial.println(s);
+                
+                printSpaces(serial, MESSAGE_INDENT);
+                Serial.print("Distance to start point = ");
+                Serial.print(latestGpsDistance);
+                Serial.print(" m. ");
+                Serial.print("Set to: ");
+                Serial.print(doWorkMinDistance);
+                Serial.println(" m.");
+                
+                printSpaces(serial, MESSAGE_INDENT);
+                Serial.print("Difference between last position: ");
+                Serial.print(latestGpsDeviation);
+                Serial.print(" m.");
+                Serial.print(" Set to: ");
+                Serial.print(doWorkGpsDeviation);
+                Serial.println(" m.");
+                //Serial.print("Debug: lastLat = ");
+                //Serial.println(lastLat, 6);
+                //Serial.print("Debug: lastLon = ");
+                //Serial.println(lastLon, 6);
+#endif
+
+                if (latestGpsDistance >= doWorkMinDistance)
+                {
+                    if (latestGpsDeviation >= doWorkGpsDeviation)
+                    {
+
+#ifdef USE_SERIAL
+                        printSpaces(serial, MESSAGE_INDENT);
+                        Serial.println("GPS fix ok, Update to TTN.");
+#endif
+
+                        uint8_t txBuffer[10];
+                        gps1.buildPacket(txBuffer);
+
+                        // Prepare uplink payload.
+                        uint8_t fPort = 10;
+                        uint8_t payloadLength = payloadBufferLength;
+
+                        payloadBuffer[0] = txBuffer[0];
+                        payloadBuffer[1] = txBuffer[1];
+                        payloadBuffer[2] = txBuffer[2];
+                        payloadBuffer[3] = txBuffer[3];
+                        payloadBuffer[4] = txBuffer[4];
+                        payloadBuffer[5] = txBuffer[5];
+                        payloadBuffer[6] = txBuffer[6];
+                        payloadBuffer[7] = txBuffer[7];
+                        payloadBuffer[8] = txBuffer[8];
+                        payloadBuffer[9] = txBuffer[9];
+                        payloadBuffer[10]= (uint8_t) round(BattVoltage * 10.0);
+
+                        int16_t BattCurrent_x10 = (int16_t) round(BattCurrent * 10.0);
+                        payloadBuffer[11] = (BattCurrent_x10 >> 8) & 0xFF;
+                        payloadBuffer[12] = BattCurrent_x10 & 0xFF;
+
+                        scheduleUplink(fPort, payloadBuffer, payloadLength);
+                    }
+                    else
+                    {
+                        sendEmptyPayload();
+#ifdef USE_SERIAL
+                        printSpaces(serial, MESSAGE_INDENT);
+                        Serial.println("Almost the same location, no update to TTN.");
+#endif
+                    }
+                }
+                else
+                {
+                    sendEmptyPayload();
+#ifdef USE_SERIAL
+                    printSpaces(serial, MESSAGE_INDENT);
+                    Serial.println("Too close to start point, no update to TTN.");
+#endif
+                }
+                lastLat = gps1.getLatitude();
+                lastLon = gps1.getLongitude();
+            }
+            else
+            {
+                sendEmptyPayload();
+#ifdef USE_SERIAL
+                printSpaces(serial, MESSAGE_INDENT);
+                serial.println(F("No gps fix, no update to TTN."));
+#endif
+            }
         }
     }
-}    
+    else
+    {
+      gps1.checkGpsFix(); // djrm
+    }
+}
  
 
 void processDownlink(ostime_t txCompleteTimestamp, uint8_t fPort, uint8_t* data, uint8_t dataLength)
@@ -787,7 +985,8 @@ void processDownlink(ostime_t txCompleteTimestamp, uint8_t fPort, uint8_t* data,
 
     const uint8_t cmdPort = 100;
     const uint8_t resetCmd= 0xC0;
-
+    const uint8_t intervalSec[4] = {0x1E, 0x3C, 0x78, 0xB4};
+		
     if (fPort == cmdPort && dataLength == 1 && data[0] == resetCmd)
     {
         #ifdef USE_SERIAL
@@ -797,9 +996,71 @@ void processDownlink(ostime_t txCompleteTimestamp, uint8_t fPort, uint8_t* data,
         ostime_t timestamp = os_getTime();
         resetCounter();
         printEvent(timestamp, "Counter reset", PrintTarget::All, false);
-    }          
-}
+    }    
+		      
+    if (fPort == cmdPort && dataLength == 1 && (data[0] == intervalSec[0] || data[0] == intervalSec[1] || data[0] == intervalSec[2] || data[0] == intervalSec[3]))
+    {
+        setUplinkInterval(data[0]);
 
+#ifdef USE_SERIAL
+        printSpaces(serial, MESSAGE_INDENT);
+        serial.println(F("Interval cmd received"));
+        ostime_t timestamp = os_getTime();
+        printEvent(timestamp, "Interval changed", PrintTarget::All, false);
+#endif
+
+    }
+
+    if (fPort == 101 && dataLength == 1 )
+    {
+        setMinDistance(data[0]);
+
+#ifdef USE_SERIAL
+        printSpaces(serial, MESSAGE_INDENT);
+        serial.println(F("Min Distance cmd received"));
+        ostime_t timestamp = os_getTime();
+        printEvent(timestamp, "Min Distance changed", PrintTarget::All, false);
+#endif
+
+    }
+
+    if (fPort == 102 && dataLength == 1 )
+    {
+        setGpsDeviation(data[0]);
+
+#ifdef USE_SERIAL
+        printSpaces(serial, MESSAGE_INDENT);
+        serial.println(F("GPS deviation cmd received"));
+        ostime_t timestamp = os_getTime();
+        printEvent(timestamp, "GPS deviation changed", PrintTarget::All, false);
+#endif
+
+    }
+    
+    if (fPort == 15)
+    {
+//        setGpsDeviation(data[0]);
+        printSpaces(serial, MESSAGE_INDENT);
+        serial.print(F("Ascii: "));
+        printAscii(serial, data, dataLength, true);
+
+#ifdef USE_SERIAL
+        printSpaces(serial, MESSAGE_INDENT);
+        serial.println(F("DL Remote Distance"));
+        ostime_t timestamp = os_getTime();
+        printEvent(timestamp, "DL Rem.Dist", PrintTarget::All, false);
+#endif
+
+        display.clearLine(UPLINK_ROW);
+        display.setCursor(COL_0, UPLINK_ROW);
+        display.print(F("DIST "));
+        printAscii(display, data, dataLength, true);
+        
+    }
+
+
+
+}
 
 //  █ █ █▀▀ █▀▀ █▀▄   █▀▀ █▀█ █▀▄ █▀▀   █▀▀ █▀█ █▀▄
 //  █ █ ▀▀█ █▀▀ █▀▄   █   █ █ █ █ █▀▀   █▀▀ █ █ █ █
@@ -848,6 +1109,8 @@ void setup()
     // Place code for initializing sensors etc. here.
 
     resetCounter();
+    gps1.init();
+
 
 //  █ █ █▀▀ █▀▀ █▀▄   █▀▀ █▀█ █▀▄ █▀▀   █▀▀ █▀█ █▀▄
 //  █ █ ▀▀█ █▀▀ █▀▄   █   █ █ █ █ █▀▀   █▀▀ █ █ █ █
